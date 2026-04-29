@@ -3,6 +3,13 @@ from dotenv import load_dotenv
 from  langchain_openai import ChatOpenAI
 
 def main():
+    load_dotenv()
+    api_key = os.getenv("OPEN_API_KEY")
+    if  api_key :
+        print(f"open_API_KEY:已設定")
+    else:
+        print("open_API_KEY未設定") 
+        return 
     agant_name = "AI_hong"
     print(f"Hello,我是{agant_name} ")
 
