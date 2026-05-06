@@ -30,10 +30,12 @@ def main():
     while True:
         user_input = input("你: ").strip()
 
+        # 結束指令判斷
         if user_input.lower() in ["exit", "quit", "結束", "bye"]:
             print("AI: 再見！期待下次與你對話。")
             break
 
+      # 空白輸入判斷
         if not user_input:
             continue
 
