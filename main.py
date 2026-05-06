@@ -11,10 +11,9 @@ def main():
     else:
         print("open_API_KEY 未設定") 
         return 
+        
     base_url = os.getenv("BASE_URL")
     model = os.getenv("MODEL")
-    # agant_name = "AI_hong"
-    # print(f"Hello, 我是 {agant_name}")
 
     llm = ChatOpenAI(
         model=model,
@@ -23,10 +22,25 @@ def main():
         api_key=api_key
     )
 
-    user_message = "你好，可以回答我問題嗎？"
-    response = llm.invoke(user_message)
+    print("--- 進入對話模式 (輸入 '結束'、'exit' 或 'quit' 退出) ---")
+    while True:
+        user_input = input("你: ").strip()
 
-    print(f"AI 回應內容:\n{response.content}")
+        if user_input.lower() in ["exit", "quit", "結束", "bye"]:
+            print("AI: 再見！期待下次與你對話。")
+            break
+
+        if not user_input:
+            continue
+
+        try:
+            print("AI: ", end="", flush=True)
+            for chunk in llm.stream(user_input):
+                if chunk.content:
+                    print(chunk.content, end="", flush=True)
+            print("\n")
+        except Exception as e:
+            print(f"發生錯誤: {e}")
 
 if __name__ == "__main__":
     main()
