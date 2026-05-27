@@ -13,6 +13,12 @@
       "skillPath": "Documents/pdf/SKILL.md",
       "computedHash": "b01d70063be7115b374550f7f95498b34c861d1eb348cb807d697d29a5c2539a"
     },
+    "peas-workshop-advanced-coach": {
+      "source": "mz038197/vanscoding-skills",
+      "sourceType": "github",
+      "skillPath": "Teacher/peas-workshop-advanced-coach/SKILL.md",
+      "computedHash": "afffc760ec128b67bd8d99aae95eb3138262cc0a13775e4870fec9b02d3f11f8"
+    },
     "skill-creator": {
       "source": "mz038197/vanscoding-skills",
       "sourceType": "github",
