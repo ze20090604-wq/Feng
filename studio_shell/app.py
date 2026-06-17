@@ -10,6 +10,7 @@ SHELL_ROOT = Path(__file__).resolve().parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from studio_shell.navigation import build_navigation_pages
 from studio_shell.page_shell import page_shell
 from studio_shell.shell_ui import format_extra_context, inject_style
 
@@ -35,7 +36,7 @@ def overview() -> None:
 1. 設定 `~/.peas-agent/config.json`（LLM api_key）與 `tts.json`（語音，選填）
 2. 在 **Home** 與 **Playground** 體驗 extra context 與共享 JSON 雙向互動
 3. 到 **UI 元件詞彙表** 找元件名稱，練習把元件名稱放進 Prompt
-4. 修改或新增 `pages/` 練習自己的 UI
+4. 新增 `pages/N_xxx.py`（如 `4_MyPage.py`）即出現在側欄，無需改 `app.py`；建完請 Rerun
 """
         )
         st.info("詳細練習題見 `docs/exercises.md`（若已安裝在專案中）。")
@@ -49,14 +50,5 @@ def overview() -> None:
     )
 
 
-pages = {
-    "Studio": [
-        st.Page(overview, title="總覽", default=True),
-        st.Page(str(SHELL_ROOT / "pages" / "1_Home.py"), title="Home"),
-        st.Page(str(SHELL_ROOT / "pages" / "2_Playground.py"), title="Playground"),
-        st.Page(str(SHELL_ROOT / "pages" / "3_Tetris.py"), title="Tetris"),
-        st.Page(str(SHELL_ROOT / "pages" / "3_UI_Cheatsheet.py"), title="UI 元件詞彙表"),
-    ],
-}
-
+pages = build_navigation_pages(shell_root=SHELL_ROOT, overview_callable=overview)
 st.navigation(pages).run()

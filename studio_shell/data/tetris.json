@@ -1,0 +1,10 @@
+{
+  "mode": "fog_of_war",
+  "available_modes": [
+    "classic",
+    "fog_of_war",
+    "reverse_gravity"
+  ],
+  "fog_base_hidden_rows": 1,
+  "fog_rows_per_10_lines": 1
+}

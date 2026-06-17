@@ -10,6 +10,7 @@ dependencies = [
     "openai-tts",
     "peas-agent-core",
     "python-dotenv>=1.2.2",
+    "st-multimodal-chatinput>=0.2.1",
     "streamlit>=1.58.0",
     "streamlit-keyup>=0.3.0",
 ]

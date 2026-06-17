@@ -5,6 +5,66 @@ from pathlib import Path
 
 import streamlit as st
 
+_MULTIMODAL_CHATINPUT_THEME_FIX = """
+<script>
+(function () {
+  const host = window.parent;
+  if (!host || host.__studioMultimodalChatinputThemeFixInstalled) {
+    return;
+  }
+  host.__studioMultimodalChatinputThemeFixInstalled = true;
+
+  function patchIframe(iframe) {
+    try {
+      const doc = iframe.contentDocument;
+      if (!doc || doc.__studioMultimodalChatinputThemeFixApplied) {
+        return;
+      }
+      doc.__studioMultimodalChatinputThemeFixApplied = true;
+
+      const style = doc.createElement("style");
+      style.textContent = `
+        textarea {
+          color: var(--text-color) !important;
+          caret-color: var(--text-color) !important;
+        }
+        textarea::placeholder {
+          color: color-mix(in srgb, var(--text-color) 55%, transparent) !important;
+          opacity: 1;
+        }
+      `;
+      doc.head.appendChild(style);
+    } catch (_err) {
+      /* ignore cross-origin iframes */
+    }
+  }
+
+  function patchAll() {
+    host.document.querySelectorAll("iframe").forEach((iframe) => {
+      if (iframe.contentDocument) {
+        patchIframe(iframe);
+      } else {
+        iframe.addEventListener("load", () => patchIframe(iframe), { once: true });
+      }
+    });
+  }
+
+  patchAll();
+  new MutationObserver(patchAll).observe(host.document.body, {
+    childList: true,
+    subtree: true,
+  });
+})();
+</script>
+"""
+
+
+def inject_multimodal_chatinput_theme_fix() -> None:
+    """st-multimodal-chatinput hardcodes white textarea text; fix for light themes."""
+    import streamlit.components.v1 as components
+
+    components.html(_MULTIMODAL_CHATINPUT_THEME_FIX, height=0, scrolling=False)
+
 
 def inject_style() -> None:
     st.markdown(
@@ -31,6 +91,7 @@ def inject_style() -> None:
 """,
         unsafe_allow_html=True,
     )
+    inject_multimodal_chatinput_theme_fix()
 
 
 def page_slug(page_name: str) -> str:

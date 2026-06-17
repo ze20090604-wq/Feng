@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import base64
 import contextlib
 import io
 import json
 import shutil
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +14,7 @@ from typing import Any
 import streamlit as st
 from openai_tts import Settings, stream_tts_play
 from openai_tts.settings import MAX_TTS_SPEED, MIN_TTS_SPEED
+from st_multimodal_chatinput import multimodal_chatinput
 
 SHELL_ROOT = Path(__file__).parent
 PROJECT_ROOT = SHELL_ROOT.parent
@@ -26,6 +29,13 @@ LEGACY_USER_SETTINGS_PATH = SHELL_ROOT / "workspace" / "user_settings.json"
 LEGACY_SESSION_DIR = SHELL_ROOT / "sessions"
 AGENT_ACTIVATION_MARKER_PATH = SHELL_ROOT / ".agent_core_activated"
 MAX_CHAT_IMAGE_BYTES = 5 * 1024 * 1024
+CHAT_IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+MIME_TO_CHAT_IMAGE_SUFFIX = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/webp": ".webp",
+}
 TTS_VOICE_OPTIONS = [
     "alloy",
     "ash",
@@ -50,6 +60,8 @@ TTS_VOICE_LABELS: dict[str, str] = {
     "sage": "女聲 · 沉穩、較內斂",
     "shimmer": "女聲 · 輕快、偏年輕",
 }
+LEGACY_HARDCODED_TTS_INSTRUCTIONS = "用台灣繁體中文說話。"
+LEGACY_HARDCODED_TTS_SPEED = 1.0
 
 
 def _tts_voice_label(voice_id: str) -> str:
@@ -69,14 +81,36 @@ def _ensure_peas_dirs() -> None:
 
 
 def _default_tts_config() -> dict[str, object]:
+    env = Settings()
     return {
         "api_key": "",
         "base_url": "",
         "enabled": False,
-        "voice": "nova",
-        "instructions": "用台灣繁體中文說話。",
-        "speed": 1.0,
+        "voice": env.voice,
+        "instructions": env.instructions,
+        "speed": env.speed,
     }
+
+
+def _is_legacy_hardcoded_tts_config(config: dict[str, object]) -> bool:
+    try:
+        speed = float(config.get("speed", 0))
+    except (TypeError, ValueError):
+        return False
+    return (
+        speed == LEGACY_HARDCODED_TTS_SPEED
+        and str(config.get("instructions", "")) == LEGACY_HARDCODED_TTS_INSTRUCTIONS
+    )
+
+
+def _upgrade_legacy_hardcoded_tts_config(config: dict[str, object]) -> dict[str, object]:
+    defaults = _default_tts_config()
+    upgraded = dict(config)
+    upgraded["instructions"] = defaults["instructions"]
+    upgraded["speed"] = defaults["speed"]
+    if str(upgraded.get("voice", "")) not in TTS_VOICE_OPTIONS:
+        upgraded["voice"] = defaults["voice"]
+    return upgraded
 
 
 def _normalize_tts_config(
@@ -95,13 +129,14 @@ def _normalize_tts_config(
 
     enabled = raw.get("enabled", raw.get("tts_enabled", defaults["enabled"]))
     instructions = raw.get("instructions", raw.get("tts_instructions", defaults["instructions"]))
+    instructions = str(instructions).strip() or str(defaults["instructions"])
 
     return {
         "api_key": str(raw.get("api_key", defaults["api_key"])),
         "base_url": str(raw.get("base_url", defaults["base_url"])),
         "enabled": bool(enabled),
         "voice": voice,
-        "instructions": str(instructions),
+        "instructions": instructions,
         "speed": speed,
     }
 
@@ -121,6 +156,12 @@ def _read_tts_config() -> tuple[dict[str, object], bool]:
         return defaults, True
 
     normalized = _normalize_tts_config(raw, defaults)
+    if _is_legacy_hardcoded_tts_config(normalized):
+        normalized = _normalize_tts_config(
+            _upgrade_legacy_hardcoded_tts_config(normalized),
+            defaults,
+        )
+        return normalized, True
     return normalized, raw != normalized
 
 
@@ -234,10 +275,12 @@ def _build_tts_settings_for_playback() -> Settings | None:
     api_key = str(cfg.get("api_key", "")).strip()
     if not api_key:
         return None
-    return Settings(
+    return replace(
+        Settings(),
         api_key=api_key,
         voice=str(st.session_state["studio_tts_voice"]),
-        instructions=str(st.session_state["studio_tts_instructions"]).strip(),
+        instructions=str(st.session_state["studio_tts_instructions"]).strip()
+        or Settings().instructions,
         speed=float(st.session_state["studio_tts_speed"]),
     )
 
@@ -247,7 +290,7 @@ def _render_tts_settings_ui(*, settings_error: str | None = None) -> None:
         st.warning(settings_error)
 
     voice_options = list(TTS_VOICE_OPTIONS)
-    current_voice = str(st.session_state.get("studio_tts_voice", "nova"))
+    current_voice = str(st.session_state.get("studio_tts_voice", Settings().voice))
     if current_voice not in voice_options:
         voice_options.insert(0, current_voice)
 
@@ -332,26 +375,23 @@ def _maybe_migrate_legacy_data() -> str | None:
 
 
 def studio_base_context() -> str:
+    pages_dir = _display_path(SHELL_ROOT / "pages")
+    data_dir = _display_path(SHELL_ROOT / "data")
     return "\n".join([
-        "使用者身份、名稱、角色、偏好以 system prompt 中的 USER.md 為準；【目前頁面狀態】與【左欄暱稱】只代表左欄表單快照，不得取代 USER.md 身份。",
-        f"Streamlit 專案根目錄：{_display_path(PROJECT_ROOT)}",
-        f"左欄 UI 程式：{_display_path(SHELL_ROOT / 'pages')}（每頁一個檔案）",
-        "左欄各頁以 `render_main()` 收集 widget 狀態，用 `format_extra_context()` 組成 extra context 並 return；"
-        "`page_shell` 會在使用者送訊息時附上【目前頁面狀態】。",
-        "extra context 以本次 render 的 widget 值為準，不可假設讀檔一定等同目前畫面；禁止在 extra context 寫【任務】或指令語氣。",
-        f"共享狀態檔目錄：{_display_path(SHELL_ROOT / 'data')}（與 pages 同層）。",
-        "檔名慣例：`{page_slug}.json`（page_slug = 頁面名稱小寫，Playground → playground.json）。",
-        "讀寫 Studio 共享 JSON 時，`read_file`/`write_file`/`edit_file` 必須使用【共享資料檔】或上述目錄的完整絕對路徑。",
-        "勿用 `studio_shell/data/...` 相對路徑（相對路徑會解析到 ~/.peas-agent/workspace，找不到專案檔）。",
-        "左欄 `render_main()` 從該檔讀取初始值餵 widget。",
-        "左欄程式讀寫 JSON 用 `load_page_data()` / `save_page_data()`（`shell_ui.py`）；Agent 不可呼叫這兩個 helper。",
-        "Agent 要改左欄狀態時：先 `read_file`【共享資料檔】，再用 `edit_file`/`write_file` 更新同一 JSON；勿直接改 Streamlit widget。",
-        "有共享檔的頁面，extra context 應含【共享資料檔】完整路徑（可用 `shared_data_path()`）。",
-        f"內建 JSON 模板目錄：{_display_path(SHELL_ROOT / 'data')}。",
-        "內建欄位：home.json → nickname(str), goal(str)；playground.json → nickname, mood(str), energy(int 1-10), event(str), count(int)。",
-        "Agent 寫入時須保留既有鍵名與型別，只改目標欄位；新頁面建立 JSON 時，鍵名須與該頁 `save_page_data({...})` 一致，可複製同目錄既有模板再改。",
-        "使用者新增 page 時：建立 `pages/N_xxx.py` + `data/{page_slug}.json` 模板（含初始鍵值），左欄 load/save 與 extra context 欄位對齊。",
-        "參考範例：`pages/1_Home.py`、`data/home.json`；`pages/2_Playground.py`、`data/playground.json`。",
+        "【身份】USER.md 為準；【目前頁面狀態】/【左欄*】僅表單快照，非使用者身份。",
+        f"【路徑】專案根：{_display_path(PROJECT_ROOT)}；左欄頁面：{pages_dir}；"
+        f"共享 JSON：{data_dir}/{{slug}}.json（slug=頁名小寫）。",
+        "【左欄↔Agent】render_main → format_extra_context，每則訊息附【目前頁面狀態】。"
+        "以 widget 快照為準，讀檔可能落後；extra context 禁【任務】/指令語氣。",
+        "【Agent 改左欄】read_file【共享資料檔】→ edit_file/write_file 更新 JSON；"
+        "禁 load_page_data/save_page_data、禁改 widget；保留既有鍵名與型別（不確定 schema 先 read_file 模板）。",
+        "【新增頁】"
+        "① studio_shell/pages/{N}_{Name}.py（必須 數字_名稱.py，例 4_Order.py；Order.py 等不符合者側欄忽略）"
+        "② studio_shell/data/{slug}.json "
+        "③ load/save 與 extra context 對齊。"
+        "N 取 pages/ 現有最大數字+1（內建 1–3，自訂通常從 4 起）。"
+        "勿改 app.py；建檔後請使用者 Rerun。"
+        "參考 studio_shell/pages/1_Home.py + studio_shell/data/home.json。",
     ])
 
 
@@ -373,23 +413,134 @@ def _remove_activation_marker() -> None:
         AGENT_ACTIVATION_MARKER_PATH.unlink()
 
 
-def _save_uploaded_chat_image(uploaded_file) -> tuple[str | None, str | None]:
-    if uploaded_file is None:
-        return None, None
+def _suffix_from_mime(mime: str) -> str | None:
+    normalized = mime.lower().split(";", 1)[0].strip()
+    return MIME_TO_CHAT_IMAGE_SUFFIX.get(normalized)
 
-    data = uploaded_file.getvalue()
+
+def _suffix_from_filename(name: str) -> str | None:
+    suffix = Path(name).suffix.lower()
+    if suffix in CHAT_IMAGE_SUFFIXES:
+        return suffix
+    return None
+
+
+def _validate_chat_image(data: bytes, suffix: str) -> str | None:
     if len(data) > MAX_CHAT_IMAGE_BYTES:
-        return None, "圖片超過 5 MB，請先壓縮後再上傳。"
+        return "圖片超過 5 MB，請先壓縮後再上傳。"
+    if suffix not in CHAT_IMAGE_SUFFIXES:
+        return "只支援 PNG、JPG、JPEG、WEBP 圖片。"
+    return None
 
-    suffix = Path(uploaded_file.name).suffix.lower()
-    if suffix not in {".png", ".jpg", ".jpeg", ".webp"}:
-        return None, "只支援 PNG、JPG、JPEG、WEBP 圖片。"
+
+def _save_chat_image_bytes(data: bytes, *, suffix: str) -> tuple[str | None, str | None]:
+    error = _validate_chat_image(data, suffix)
+    if error:
+        return None, error
 
     _ensure_peas_dirs()
     filename = f"chat_image_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:8]}{suffix}"
     target = CHAT_IMAGE_DIR / filename
     target.write_bytes(data)
-    return target.relative_to(PEAS_WORKSPACE).as_posix(), None
+    return str(target.resolve()), None
+
+
+def _pending_image_from_bytes(*, data: bytes, suffix: str, name: str, mime: str) -> tuple[dict[str, Any] | None, str | None]:
+    error = _validate_chat_image(data, suffix)
+    if error:
+        return None, error
+    return {"bytes": data, "suffix": suffix, "name": name, "mime": mime}, None
+
+
+def _pending_image_from_multimodal_file(file_info: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    mime = str(file_info.get("type", "") or "")
+    if not mime.startswith("image/"):
+        return None, "只支援 PNG、JPG、JPEG、WEBP 圖片。"
+
+    suffix = _suffix_from_mime(mime) or _suffix_from_filename(str(file_info.get("name", "") or ""))
+    if suffix is None:
+        return None, "只支援 PNG、JPG、JPEG、WEBP 圖片。"
+
+    raw_content = file_info.get("content", "")
+    if not raw_content:
+        return None, "無法讀取貼上的圖片內容。"
+
+    try:
+        data = base64.b64decode(raw_content)
+    except (ValueError, TypeError):
+        return None, "無法讀取貼上的圖片內容。"
+
+    name = str(file_info.get("name", "") or f"pasted{suffix}")
+    return _pending_image_from_bytes(data=data, suffix=suffix, name=name, mime=mime)
+
+
+def _multimodal_user_text(chatinput: dict[str, Any]) -> str:
+    return str(chatinput.get("textInput") or chatinput.get("text") or "").strip()
+
+
+def _pending_image_from_data_url(
+    data_url: str,
+    *,
+    index: int = 0,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not data_url.startswith("data:") or "," not in data_url:
+        return None, "無法讀取貼上的圖片內容。"
+
+    header, encoded = data_url.split(",", 1)
+    mime = header.split(":", 1)[1].split(";", 1)[0].strip().lower()
+    suffix = _suffix_from_mime(mime)
+    if suffix is None:
+        return None, "只支援 PNG、JPG、JPEG、WEBP 圖片。"
+
+    try:
+        data = base64.b64decode(encoded)
+    except (ValueError, TypeError):
+        return None, "無法讀取貼上的圖片內容。"
+
+    name = f"pasted_{index + 1}{suffix}"
+    return _pending_image_from_bytes(data=data, suffix=suffix, name=name, mime=mime)
+
+
+def _resolve_submission_image(
+    chatinput: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    multimodal_files = chatinput.get("uploadedFiles") or []
+    image_files = [
+        file_info
+        for file_info in multimodal_files
+        if str(file_info.get("type", "") or "").startswith("image/")
+    ]
+    if image_files:
+        return _pending_image_from_multimodal_file(image_files[-1])
+
+    data_urls = chatinput.get("images") or []
+    if data_urls:
+        return _pending_image_from_data_url(str(data_urls[-1]), index=len(data_urls) - 1)
+
+    return None, None
+
+
+def _chat_submission_token(chatinput: dict[str, Any]) -> str:
+    text = _multimodal_user_text(chatinput)
+    files = chatinput.get("uploadedFiles") or []
+    image_names = sorted(
+        str(file_info.get("name", "") or "")
+        for file_info in files
+        if str(file_info.get("type", "") or "").startswith("image/")
+    )
+    if not image_names:
+        image_names = [f"data-url:{idx}" for idx, _ in enumerate(chatinput.get("images") or [])]
+    return f"{text}\0{','.join(image_names)}"
+
+
+def _save_uploaded_chat_image(uploaded_file) -> tuple[str | None, str | None]:
+    if uploaded_file is None:
+        return None, None
+
+    suffix = _suffix_from_filename(uploaded_file.name)
+    if suffix is None:
+        return None, "只支援 PNG、JPG、JPEG、WEBP 圖片。"
+    return _save_chat_image_bytes(uploaded_file.getvalue(), suffix=suffix)
 
 
 def _new_session_path() -> Path:
@@ -560,6 +711,7 @@ def _create_agent_for_session(session_name: str) -> Any:
         ) from exc
     return Agent.create(
         session_name=session_name,
+        project_root=PROJECT_ROOT,
         host_context=studio_base_context(),
     )
 
@@ -716,15 +868,6 @@ def render_chat_panel(*, extra_context: str = "", page_name: str = "") -> None:
 
     _render_tts_settings_ui(settings_error=settings_error)
 
-    uploaded_image = st.file_uploader(
-        "附加圖片（選填）",
-        type=["png", "jpg", "jpeg", "webp"],
-        key=f"studio_chat_image_{current_session}",
-        help="圖片只會送給下一則訊息；支援 PNG/JPG/WEBP，大小上限 5 MB。",
-    )
-    if uploaded_image is not None:
-        st.image(uploaded_image, caption="下一則訊息會附上這張圖片", use_container_width=True)
-
     try:
         agent = _get_agent_for_session(current_session)
     except RuntimeError as exc:
@@ -746,25 +889,65 @@ def render_chat_panel(*, extra_context: str = "", page_name: str = "") -> None:
             with st.chat_message(role):
                 st.markdown(text)
 
-    if user_text := st.chat_input("詢問 Agent...", key="studio_chat"):
-        image_path, image_error = _save_uploaded_chat_image(uploaded_image)
+    st.caption("輸入文字後 Enter 送出；可 Ctrl+V 貼圖，或點輸入框內圖片按鈕選檔（PNG/JPG/WEBP，上限 5 MB）。")
+    chatinput = multimodal_chatinput(
+        key=f"studio_multimodal_{current_session}",
+    )
+
+    should_process_submission = False
+    submission_token = ""
+    user_text = ""
+    pending_image: dict[str, Any] | None = None
+    image_path: str | None = None
+
+    if chatinput is not None:
+        submission_token = _chat_submission_token(chatinput)
+        if submission_token != st.session_state.get("studio_last_chat_submission_token"):
+            user_text = _multimodal_user_text(chatinput)
+            pending_image, image_error = _resolve_submission_image(chatinput)
+            if image_error:
+                st.warning(image_error)
+                pending_image = None
+            if user_text or pending_image is not None:
+                should_process_submission = True
+
+    if should_process_submission:
+        if pending_image is not None:
+            image_path, save_error = _save_chat_image_bytes(
+                pending_image["bytes"],
+                suffix=pending_image["suffix"],
+            )
+            if save_error:
+                st.warning(save_error)
+                image_path = None
+                pending_image = None
+            if not user_text and pending_image is None:
+                should_process_submission = False
+
+    if should_process_submission:
+        st.session_state["studio_last_chat_submission_token"] = submission_token
+
         display_user_text = user_text
-        if image_error:
-            st.warning(image_error)
-        elif image_path:
-            display_user_text = f"{user_text}\n\n（已附圖：{image_path}）"
+        if image_path:
+            attachment_note = user_text or "（已附圖，未輸入文字）"
+            display_user_text = f"{attachment_note}\n\n（已附圖：{image_path}）"
 
         st.session_state["studio_chat_history"].append(("user", display_user_text))
+
+        prompt_user_text = user_text or "（使用者只附上圖片，未輸入文字）"
         if extra_context.strip():
-            prompt = f"【目前頁面狀態】\n{extra_context.strip()}\n\n使用者問題：{user_text}"
+            prompt = f"【目前頁面狀態】\n{extra_context.strip()}\n\n使用者問題：{prompt_user_text}"
         else:
-            prompt = f"使用者問題：{user_text}"
+            prompt = f"使用者問題：{prompt_user_text}"
 
         with chat:
             with st.chat_message("user"):
-                st.markdown(user_text)
-                if uploaded_image is not None and image_path:
-                    st.image(uploaded_image, caption="已附圖", use_container_width=True)
+                if user_text:
+                    st.markdown(user_text)
+                elif image_path:
+                    st.markdown("（已附圖，未輸入文字）")
+                if pending_image is not None and image_path:
+                    st.image(pending_image["bytes"], caption="已附圖", use_container_width=True)
             with st.chat_message("assistant"):
                 placeholder = st.empty()
                 answer_parts: list[str] = []
